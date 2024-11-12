@@ -80,6 +80,7 @@ impl<'a> PluginAudioProcessor<'a, ClapTestShared, ClapTestMainThread<'a>>
             }
         }
 
+        #[allow(unused_variables)]
         for event_batch in events.input.batch() {
             // 音量を0.5倍にする
             for buf in channel_buffers.iter_mut().flatten() {
@@ -98,6 +99,7 @@ pub struct ClapTestShared {}
 impl<'a> PluginShared<'a> for ClapTestShared {}
 
 pub struct ClapTestMainThread<'a> {
+    #[allow(dead_code)]
     shared: &'a ClapTestShared,
 }
 
