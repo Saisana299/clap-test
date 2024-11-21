@@ -1,4 +1,5 @@
 use clack_extensions::audio_ports::*;
+use clack_extensions::note_ports::*;
 use clack_plugin::prelude::*;
 
 pub struct ClapTest;
@@ -21,6 +22,8 @@ impl DefaultPluginFactory for ClapTest {
         PluginDescriptor::new("com.github.saisana299.clap-test", "Clap Test")
             .with_vendor("Saisana299")
             .with_features([AUDIO_EFFECT, STEREO])
+            .with_version("1.0.0")
+            .with_description("Test plugin for Clap")
     }
 
     fn new_shared(_host: HostSharedHandle) -> Result<Self::Shared<'_>, PluginError> {
@@ -82,6 +85,11 @@ impl<'a> PluginAudioProcessor<'a, ClapTestShared, ClapTestMainThread<'a>>
 
         #[allow(unused_variables)]
         for event_batch in events.input.batch() {
+
+            for event in event_batch.events() {
+                self.handle_event(event);
+            }
+
             // 音量を0.5倍にする
             for buf in channel_buffers.iter_mut().flatten() {
                for sample in buf.iter_mut() {
@@ -91,6 +99,19 @@ impl<'a> PluginAudioProcessor<'a, ClapTestShared, ClapTestMainThread<'a>>
         }
 
         Ok(ProcessStatus::ContinueIfNotQuiet)
+    }
+}
+
+impl ClapTestAudioProcessor<'_> {
+    fn handle_event(&mut self, event: &UnknownEvent) {
+        match event.as_core_event() {
+            Some(_core_event) => {
+                todo!()
+            }
+            None => {
+                todo!()
+            }
+        }
     }
 }
 
@@ -117,6 +138,27 @@ impl<'a> PluginAudioPortsImpl for ClapTestMainThread<'a> {
                 flags: AudioPortFlags::IS_MAIN,
                 port_type: Some(AudioPortType::STEREO),
                 in_place_pair: None,
+            })
+        }
+    }
+}
+
+impl<'a> PluginNotePortsImpl for ClapTestMainThread<'a> {
+    fn count(&mut self, is_input: bool) -> u32 {
+        if is_input {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn get(&mut self, index: u32, is_input: bool, writer: &mut NotePortInfoWriter) {
+        if is_input && index == 0 {
+            writer.set(&NotePortInfo {
+                id: ClapId::new(1),
+                name: b"main",
+                preferred_dialect: Some(NoteDialect::Clap),
+                supported_dialects: NoteDialects::CLAP,
             })
         }
     }
