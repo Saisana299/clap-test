@@ -1,169 +1,171 @@
-use clack_extensions::audio_ports::*;
-use clack_extensions::note_ports::*;
-use clack_plugin::prelude::*;
+use nih_plug::prelude::*;
+use std::sync::Arc;
+use atomic_float::AtomicF32; // 追加
+use nih_plug_iced::IcedState; // 追加
 
-pub struct ClapTest;
+mod editor; // 追加
 
-impl Plugin for ClapTest {
-    type AudioProcessor<'a> = ClapTestAudioProcessor<'a>;
-    type Shared<'a> = ClapTestShared;
-    type MainThread<'a> = ClapTestMainThread<'a>;
+/// 完全に無音に切り替えた後、ピークメーターが12dB減衰するまでの時間。
+const PEAK_METER_DECAY_MS: f64 = 150.0; // 追加
 
-    fn declare_extensions(builder: &mut PluginExtensions<Self>, _shared: Option<&ClapTestShared>) {
-        builder
-            .register::<PluginAudioPorts>();
+struct Claptest {
+    params: Arc<ClaptestParams>,
+
+    /// ピークメーターの正規化用
+    peak_meter_decay_weight: f32, // 追加
+    /// ピークメーターの現在のデータ
+    peak_meter: Arc<AtomicF32>, // 追加
+}
+
+#[derive(Params)]
+struct ClaptestParams {
+    /// エディターの状態
+    #[persist = "editor-state"] // 追加
+    editor_state: Arc<IcedState>, // 追加
+
+    #[id = "gain"]
+    pub gain: FloatParam,
+}
+
+impl Default for Claptest {
+    fn default() -> Self {
+        Self {
+            params: Arc::new(ClaptestParams::default()),
+
+            peak_meter_decay_weight: 1.0, // 追加
+            peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)), // 追加
+        }
     }
 }
 
-impl DefaultPluginFactory for ClapTest {
-    fn get_descriptor() -> PluginDescriptor {
-        use clack_plugin::plugin::features::*;
+impl Default for ClaptestParams {
+    fn default() -> Self {
+        Self {
+            editor_state: editor::default_state(), // 追加
 
-        PluginDescriptor::new("com.github.saisana299.clap-test", "Clap Test")
-            .with_vendor("Saisana299")
-            .with_features([AUDIO_EFFECT, STEREO])
-            .with_version("1.0.0")
-            .with_description("Test plugin for Clap")
-    }
-
-    fn new_shared(_host: HostSharedHandle) -> Result<Self::Shared<'_>, PluginError> {
-        Ok(ClapTestShared {})
-    }
-
-    fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
-        shared: &'a Self::Shared<'a>,
-    ) -> Result<Self::MainThread<'a>, PluginError> {
-        Ok(Self::MainThread { shared })
+            gain: FloatParam::new(
+                "Gain",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-30.0),
+                    max: util::db_to_gain(30.0),
+                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+        }
     }
 }
 
-pub struct ClapTestAudioProcessor<'a> {
-    _shared: &'a ClapTestShared,
-}
+impl Plugin for Claptest {
+    const NAME: &'static str = "Claptest";
+    const VENDOR: &'static str = "Saisana299";
+    const URL: &'static str = env!("CARGO_PKG_HOMEPAGE");
+    const EMAIL: &'static str = "your@email.com";
 
-impl<'a> PluginAudioProcessor<'a, ClapTestShared, ClapTestMainThread<'a>>
-    for ClapTestAudioProcessor<'a>
-{
-    fn activate(
-        _host: HostAudioProcessorHandle<'a>,
-        _main_thread: &mut ClapTestMainThread<'a>,
-        _shared: &'a ClapTestShared,
-        _audio_config: PluginAudioConfiguration,
-    ) -> Result<Self, PluginError> {
-        Ok(Self { _shared })
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    /// AUDIO_IO_LAYOUTSを変更
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(1),
+            main_output_channels: NonZeroU32::new(1),
+            ..AudioIOLayout::const_default()
+        },
+    ];
+
+    /// 以下は削除
+    // const MIDI_INPUT: MidiConfig = MidiConfig::None;
+    // const MIDI_OUTPUT: MidiConfig = MidiConfig::None;
+
+    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+    type SysExMessage = ();
+    type BackgroundTask = ();
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
     }
 
+    /// 以下を追加
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.peak_meter.clone(),
+            self.params.editor_state.clone(),
+        )
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig, // アンダーバーを消す
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        // 以下を追加
+        self.peak_meter_decay_weight = 0.25f64
+            .powf((buffer_config.sample_rate as f64 * PEAK_METER_DECAY_MS / 1000.0).recip())
+            as f32;
+
+        true
+    }
+
+    /// 以下を削除
+    // fn reset(&mut self) {
+    // }
+
+    /// processの内容を編集
     fn process(
         &mut self,
-        _process: Process,
-        mut audio: Audio,
-        events: Events,
-    ) -> Result<ProcessStatus, PluginError> {
-        let mut port_pair = audio
-            .port_pair(0)
-            .ok_or(PluginError::Message("No input/output ports found"))?;
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        _context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        for channel_samples in buffer.iter_samples() {
+            let mut amplitude = 0.0;
+            let num_samples = channel_samples.len();
 
-        let mut output_channels = port_pair
-            .channels()?
-            .into_f32()
-            .ok_or(PluginError::Message("Expected f32 input/output"))?;
+            let gain = self.params.gain.smoothed.next();
+            for sample in channel_samples {
+                *sample *= gain;
+                amplitude += *sample;
+            }
 
-        let mut channel_buffers = [None, None];
+            // GUIが表示されている時のみGUIの計算を行う
+            if self.params.editor_state.is_open() {
+                amplitude = (amplitude / num_samples as f32).abs();
+                let current_peak_meter = self.peak_meter.load(std::sync::atomic::Ordering::Relaxed);
+                let new_peak_meter = if amplitude > current_peak_meter {
+                    amplitude
+                } else {
+                    current_peak_meter * self.peak_meter_decay_weight
+                        + amplitude * (1.0 - self.peak_meter_decay_weight)
+                };
 
-        for (pair, buf) in output_channels.iter_mut().zip(&mut channel_buffers) {
-            *buf = match pair {
-                ChannelPair::InputOnly(_) => None,
-                ChannelPair::OutputOnly(_) => None,
-                ChannelPair::InPlace(b) => Some(b),
-                ChannelPair::InputOutput(i, o) => {
-                    o.copy_from_slice(i);
-                    Some(o)
-                }
+                self.peak_meter
+                    .store(new_peak_meter, std::sync::atomic::Ordering::Relaxed)
             }
         }
 
-        #[allow(unused_variables)]
-        for event_batch in events.input.batch() {
-
-            for event in event_batch.events() {
-                self.handle_event(event);
-            }
-
-            // 音量を0.5倍にする
-            for buf in channel_buffers.iter_mut().flatten() {
-               for sample in buf.iter_mut() {
-                   *sample *= 0.5;
-               }
-            }
-        }
-
-        Ok(ProcessStatus::ContinueIfNotQuiet)
+        ProcessStatus::Normal
     }
 }
 
-impl ClapTestAudioProcessor<'_> {
-    fn handle_event(&mut self, event: &UnknownEvent) {
-        match event.as_core_event() {
-            Some(_core_event) => {
-                todo!()
-            }
-            None => {
-                todo!()
-            }
-        }
-    }
+impl ClapPlugin for Claptest {
+    const CLAP_ID: &'static str = "com.your-domain.claptest";
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A short description of your plugin");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+
+     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Stereo];
 }
 
-pub struct ClapTestShared {}
-
-impl<'a> PluginShared<'a> for ClapTestShared {}
-
-pub struct ClapTestMainThread<'a> {
-    #[allow(dead_code)]
-    shared: &'a ClapTestShared,
-}
-
-impl<'a> PluginAudioPortsImpl for ClapTestMainThread<'a> {
-    fn count(&mut self, _is_input: bool) -> u32 {
-        1
-    }
-
-    fn get(&mut self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
-        if index == 0 {
-            writer.set(&AudioPortInfo {
-                id: ClapId::new(0),
-                name: b"main",
-                channel_count: 2,
-                flags: AudioPortFlags::IS_MAIN,
-                port_type: Some(AudioPortType::STEREO),
-                in_place_pair: None,
-            })
-        }
-    }
-}
-
-impl<'a> PluginNotePortsImpl for ClapTestMainThread<'a> {
-    fn count(&mut self, is_input: bool) -> u32 {
-        if is_input {
-            1
-        } else {
-            0
-        }
-    }
-
-    fn get(&mut self, index: u32, is_input: bool, writer: &mut NotePortInfoWriter) {
-        if is_input && index == 0 {
-            writer.set(&NotePortInfo {
-                id: ClapId::new(1),
-                name: b"main",
-                preferred_dialect: Some(NoteDialect::Clap),
-                supported_dialects: NoteDialects::CLAP,
-            })
-        }
-    }
-}
-
-impl<'a> PluginMainThread<'a, ClapTestShared> for ClapTestMainThread<'a> {}
-
-clack_export_entry!(SinglePluginEntry<ClapTest>);
+nih_export_clap!(Claptest);
